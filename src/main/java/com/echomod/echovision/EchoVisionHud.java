@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3fc;
 
 import java.util.List;
 
@@ -18,15 +19,15 @@ import java.util.List;
  *
  *  - экран по-прежнему полностью чёрный (игрок "слеп" глазами — это и
  *    есть смысл мода);
- *  - но точки, до которых уже долетела волна эха (EchoRayHit из
- *    SoundPulse), проецируются из их РЕАЛЬНЫХ координат в мире на экран
- *    через камеру игрока — то есть двигаются вместе с поворотом и
- *    перемещением камеры так же, как обычная 3D-геометрия игры, а не как
- *    плоская мини-карта;
- *  - каждая такая точка рисуется текстурой того самого блока, от
- *    которого отразилась волна (EchoRayHit#sprite), поэтому окружение
- *    действительно узнаётся по текстурам, а не только по светящимся
- *    точкам.
+ *  - точки, до которых уже долетела волна эха (EchoRayHit из SoundPulse),
+ *    проецируются из их РЕАЛЬНЫХ координат в мире на экран через камеру
+ *    игрока — то есть двигаются вместе с поворотом и перемещением камеры
+ *    так же, как обычная 3D-геометрия игры, а не как плоская мини-карта;
+ *  - сейчас каждая такая точка рисуется заливкой цвета волны (тёплый для
+ *    звуков мира, холодный для микрофона) — настоящая текстура блока пока
+ *    не подключена (см. комментарий в EchoRayTracer, почему старый путь
+ *    к BlockModelShaper в этой версии Minecraft не существует); это
+ *    можно будет докрутить отдельным заходом.
  *
  * Стандартный прицел (crosshair) этот класс не трогает и не рисует —
  * он остаётся полностью ванильным. Раньше чёрный фон рисовался ПЕРЕД
@@ -65,11 +66,16 @@ public final class EchoVisionHud {
         // Игрок по-прежнему ничего не видит "глазами" — только через эхо.
         context.fill(0, 0, width, height, 0xFF000000);
 
-        Camera camera = client.gameRenderer.getMainCamera();
-        Vec3 camPos = camera.getPosition();
-        Vec3 forward = camera.getLookVector();
-        Vec3 up = camera.getUpVector();
-        Vec3 left = camera.getLeftVector();
+        // Camera в этой версии Minecraft отдаёт позицию через position(), а
+        // направления — через forwardVector()/upVector()/leftVector() в виде
+        // JOML Vector3fc (не Vec3!), поэтому конвертируем явно. mainCamera()
+        // — обычный метод (не "get..."), а gameRenderer у Minecraft — само
+        // публичное поле, не геттер (см. javap-дамп в CI-логе).
+        Camera camera = client.gameRenderer.mainCamera();
+        Vec3 camPos = camera.position();
+        Vec3 forward = toVec3(camera.forwardVector());
+        Vec3 up = toVec3(camera.upVector());
+        Vec3 left = toVec3(camera.leftVector());
 
         double fovDeg = client.options.fov().get();
         double focal = (height / 2.0) / Math.tan(Math.toRadians(fovDeg) / 2.0);
@@ -128,25 +134,15 @@ public final class EchoVisionHud {
         int x = (int) screenX - pixelSize / 2;
         int y = (int) screenY - pixelSize / 2;
 
-        if (hit.sprite != null) {
-            // Настоящая текстура блока, от которого отразилась волна — это
-            // и даёт "частично увидеть текстуру блока" из ТЗ, а не просто
-            // силуэт/точку.
-            //
-            // ПРИМЕЧАНИЕ ПО API: точную сигнатуру блита спрайта с тинтом
-            // нужно свериться с фактическим GuiGraphicsExtractor в вашем
-            // дев-окружении (в присланных файлах этого интерфейса нет —
-            // видимо, он из зависимости Fabric API/Minecraft, которая сюда
-            // не входила). Здесь используется наиболее вероятный по
-            // аналогии вызов; если сигнатура отличается, скорее всего
-            // потребуется что-то вроде
-            // context.blit(RenderType::guiTextured, sprite.atlasLocation(),
-            //     x, y, sprite.getU0(), sprite.getV0(), pixelSize, pixelSize, ..., argb)
-            // — замените вызов ниже на актуальный для вашей версии.
-            context.blitSprite(hit.sprite, x, y, pixelSize, pixelSize, argb);
-        } else {
-            // Фолбэк, если спрайт блока получить не удалось — просто цветной пиксель.
-            context.fill(x, y, x + pixelSize, y + pixelSize, argb);
-        }
+        // Текстуру блока-отражателя пока не рисуем (hit.sprite всегда null —
+        // см. комментарий в EchoRayTracer про то, почему старый путь к
+        // BlockModelShaper в этой версии Minecraft не существует). Пока что
+        // просто заливаем точку цветом волны — это гарантированно
+        // компилируется и уже даёт настоящую 3D-картину окружения.
+        context.fill(x, y, x + pixelSize, y + pixelSize, argb);
+    }
+
+    private static Vec3 toVec3(Vector3fc v) {
+        return new Vec3(v.x(), v.y(), v.z());
     }
 }

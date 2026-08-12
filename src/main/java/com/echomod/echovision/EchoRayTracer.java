@@ -1,6 +1,5 @@
 package com.echomod.echovision;
 
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
@@ -27,6 +26,17 @@ import java.util.List;
  * level.clip(...) (быстрый нативный voxel-DDA от Mojang, тот же механизм,
  * которым игра считает наведение прицела), а результат — лёгкие POJO
  * (EchoRayHit), без каких-либо тикающих сущностей.
+ *
+ * ПРО ТЕКСТУРУ БЛОКА: в этой версии Minecraft (26.2) старый путь
+ * Minecraft#getBlockRenderer()#getBlockModelShaper()#getParticleIcon(state)
+ * не существует — классы BlockRenderDispatcher/BlockModelShaper тут вообще
+ * не найдены (см. javap-дамп в CI). Судя по полям GuiGraphicsExtractor,
+ * текстуры теперь достаются через net.minecraft.client.resources.model.sprite.SpriteGetter
+ * и/или AtlasManager/ModelManager — но точный метод ещё не подтверждён.
+ * Пока что EchoRayHit#sprite всегда null, и EchoVisionHud рисует точку
+ * заливкой цвета вместо текстуры блока. Это осознанное временное
+ * упрощение, чтобы мод для начала гарантированно собрался — подключить
+ * настоящую текстуру можно отдельным заходом после этого.
  */
 public final class EchoRayTracer {
 
@@ -35,8 +45,6 @@ public final class EchoRayTracer {
     public static List<EchoRayHit> trace(ClientLevel level, Vec3 origin, int rayCount, double maxDistance) {
         List<EchoRayHit> hits = new ArrayList<>(rayCount);
         if (rayCount <= 0) return hits;
-
-        Minecraft client = Minecraft.getInstance();
 
         // Равномерное распределение направлений по сфере методом золотого
         // сечения — даёт куда более ровное покрытие, чем случайные
@@ -74,15 +82,7 @@ public final class EchoRayTracer {
             double dist = origin.distanceTo(blockHit.getLocation());
             if (dist > maxDistance) continue;
 
-            TextureAtlasSprite sprite;
-            try {
-                sprite = client.getBlockRenderer().getBlockModelShaper().getParticleIcon(state);
-            } catch (RuntimeException e) {
-                // Не у каждого блока есть обычная particle-текстура (сложные
-                // кастомные модели и т.п.) — в этом случае просто рисуем
-                // точку без текстуры (см. фолбэк в EchoVisionHud).
-                sprite = null;
-            }
+            TextureAtlasSprite sprite = null; // см. комментарий класса выше
 
             hits.add(new EchoRayHit(pos, blockHit.getDirection(), blockHit.getLocation(), dist, sprite));
         }
@@ -90,3 +90,4 @@ public final class EchoRayTracer {
         return hits;
     }
 }
+
