@@ -1,0 +1,103 @@
+name: Build EchoVision
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+
+      # ВРЕМЕННЫЙ диагностический шаг. Он никак не чинит сборку сам по
+      # себе — он декомпилирует реальный джарник Minecraft (через
+      # штатную задачу Loom genSources) и печатает в лог CI точные
+      # сигнатуры классов, вокруг которых были ошибки компиляции
+      # (Camera, GameRenderer, Minecraft/BlockRenderDispatcher,
+      # GuiGraphicsExtractor#blitSprite, RenderPipelines). У разработчика
+      # нет доступа в интернет, чтобы скачать/посмотреть этот джарник
+      # напрямую, поэтому вместо гадания по аналогии с обычным Mojang-
+      # нейминком эти сигнатуры нужно увидеть один раз здесь, в логе.
+      # Удалите этот шаг после того, как сборка снова заработает.
+      - name: DEBUG - dump relevant Minecraft API signatures
+        run: |
+          echo "DEBUG-SCRIPT-VERSION: v3-content-search"
+          gradle genSources --stacktrace
+
+          echo "===== Всё содержимое minecraftMaven (тут должен появиться jar с исходниками рядом с обычным) ====="
+          find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -type f 2>/dev/null
+
+          echo "===== Все jar-файлы в кэше fabric-loom (для справки) ====="
+          find "$HOME/.gradle/caches/fabric-loom" -iname "*.jar" 2>/dev/null
+
+          echo "===== Ищу jar, который реально содержит Camera.java внутри ====="
+          SRC_JAR=""
+          for jar in $(find "$HOME/.gradle/caches/fabric-loom" -iname "*.jar" 2>/dev/null); do
+            if unzip -l "$jar" 2>/dev/null | grep -q "Camera\.java"; then
+              echo "Найден кандидат: $jar"
+              SRC_JAR="$jar"
+              break
+            fi
+          done
+
+          if [ -z "$SRC_JAR" ]; then
+            echo "!!! Не нашли jar с Camera.java по всему кэшу fabric-loom, ищу по всему ~/.gradle (может быть медленно)..."
+            for jar in $(find "$HOME/.gradle" -iname "*.jar" 2>/dev/null); do
+              if unzip -l "$jar" 2>/dev/null | grep -q "Camera\.java"; then
+                echo "Найден кандидат: $jar"
+                SRC_JAR="$jar"
+                break
+              fi
+            done
+          fi
+
+          echo "Using sources jar: $SRC_JAR"
+          mkdir -p /tmp/mcsrc
+          if [ -n "$SRC_JAR" ]; then
+            unzip -o -q "$SRC_JAR" -d /tmp/mcsrc
+          else
+            echo "!!! Так и не нашли исходники ни в одном jar-е. Возможно, genSources кладёт их не в jar, а россыпью файлов — ищу так:"
+            find "$HOME/.gradle" -iname "Camera.java" 2>/dev/null
+          fi
+
+          echo "===== Camera.java (полностью) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "Camera.java" -path "*client*" -exec cat {} \; 2>/dev/null
+
+          echo "===== GameRenderer.java (строки со словом camera/Camera) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "GameRenderer.java" -exec grep -n -i "camera" {} \; 2>/dev/null
+
+          echo "===== Minecraft.java (строки про blockRenderer/BlockRenderDispatcher) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "Minecraft.java" -path "*client*" -exec grep -n -i "blockRenderer\|BlockRenderDispatcher" {} \; 2>/dev/null
+
+          echo "===== GuiGraphicsExtractor.java (весь файл, если найдётся) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "GuiGraphicsExtractor.java" -exec cat {} \; 2>/dev/null
+          echo "===== ...и на случай, если правильное имя класса другое, ищем любой файл со словом blitSprite ====="
+          grep -rl "blitSprite" /tmp/mcsrc 2>/dev/null | while read -r f; do echo "--- $f ---"; grep -n -B2 -A2 "blitSprite" "$f"; done
+
+          echo "===== RenderPipelines.java (строки со словом GUI) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "RenderPipelines.java" -exec grep -n -i "GUI" {} \; 2>/dev/null
+
+          echo "===== ClipContext.java (полностью, на всякий случай) ====="
+          find /tmp/mcsrc "$HOME/.gradle" -iname "ClipContext.java" -exec cat {} \; 2>/dev/null
+
+      - name: Build with Gradle
+        run: gradle build --stacktrace
+
+      - name: Upload built jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: echovision-jar
+          path: build/libs/*.jar
