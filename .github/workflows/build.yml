@@ -23,75 +23,68 @@ jobs:
           gradle-version: '9.5.1'
 
       # ВРЕМЕННЫЙ диагностический шаг. Он никак не чинит сборку сам по
-      # себе — он декомпилирует реальный джарник Minecraft (через
-      # штатную задачу Loom genSources) и печатает в лог CI точные
-      # сигнатуры классов, вокруг которых были ошибки компиляции
+      # себе — он читает точные сигнатуры методов нужных классов Minecraft
       # (Camera, GameRenderer, Minecraft/BlockRenderDispatcher,
-      # GuiGraphicsExtractor#blitSprite, RenderPipelines). У разработчика
-      # нет доступа в интернет, чтобы скачать/посмотреть этот джарник
-      # напрямую, поэтому вместо гадания по аналогии с обычным Mojang-
-      # нейминком эти сигнатуры нужно увидеть один раз здесь, в логе.
-      # Удалите этот шаг после того, как сборка снова заработает.
+      # GuiGraphicsExtractor#blitSprite, RenderPipelines, ClipContext)
+      # прямо из скомпилированных .class-файлов джарника через javap
+      # (штатная утилита JDK, без декомпиляции — раньше пробовали через
+      # Loom genSources, но в этой версии Loom декомпилированные исходники
+      # не кладутся ни в один доступный файл). У разработчика нет доступа
+      # в интернет, чтобы посмотреть эти сигнатуры напрямую, поэтому их
+      # нужно увидеть один раз здесь, в логе. Удалите этот шаг после того,
+      # как сборка снова заработает.
       - name: DEBUG - dump relevant Minecraft API signatures
         run: |
-          echo "DEBUG-SCRIPT-VERSION: v3-content-search"
-          gradle genSources --stacktrace
+          echo "DEBUG-SCRIPT-VERSION: v4-javap"
 
-          echo "===== Всё содержимое minecraftMaven (тут должен появиться jar с исходниками рядом с обычным) ====="
-          find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -type f 2>/dev/null
+          MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
+          echo "Using jar: $MC_JAR"
+          if [ -z "$MC_JAR" ]; then
+            echo "!!! Джарник ещё не скачан/не смаплен на этом этапе — соберём проект хотя бы частично, чтобы Loom его подготовил"
+            gradle compileJava --stacktrace || true
+            MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
+            echo "Using jar (2nd try): $MC_JAR"
+          fi
 
-          echo "===== Все jar-файлы в кэше fabric-loom (для справки) ====="
-          find "$HOME/.gradle/caches/fabric-loom" -iname "*.jar" 2>/dev/null
+          find_class() {
+            unzip -l "$MC_JAR" | grep -iE "$1" | awk '{print $4}'
+          }
 
-          echo "===== Ищу jar, который реально содержит Camera.java внутри ====="
-          SRC_JAR=""
-          for jar in $(find "$HOME/.gradle/caches/fabric-loom" -iname "*.jar" 2>/dev/null); do
-            if unzip -l "$jar" 2>/dev/null | grep -q "Camera\.java"; then
-              echo "Найден кандидат: $jar"
-              SRC_JAR="$jar"
-              break
-            fi
-          done
-
-          if [ -z "$SRC_JAR" ]; then
-            echo "!!! Не нашли jar с Camera.java по всему кэшу fabric-loom, ищу по всему ~/.gradle (может быть медленно)..."
-            for jar in $(find "$HOME/.gradle" -iname "*.jar" 2>/dev/null); do
-              if unzip -l "$jar" 2>/dev/null | grep -q "Camera\.java"; then
-                echo "Найден кандидат: $jar"
-                SRC_JAR="$jar"
-                break
+          dump_javap() {
+            local label="$1" pattern="$2" grepfor="$3"
+            echo "===== $label ====="
+            local entry
+            entry=$(find_class "$pattern" | head -n1)
+            echo "entry: $entry"
+            if [ -n "$entry" ]; then
+              local fqn
+              fqn=$(echo "$entry" | sed 's/\.class$//' | tr '/' '.')
+              if [ -n "$grepfor" ]; then
+                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 | grep -i -E "$grepfor" || echo "(нет строк по маске '$grepfor' — см. полный вывод ниже)"
+                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 || true
+              else
+                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 || true
               fi
-            done
-          fi
+            else
+              echo "!!! класс не найден по паттерну $pattern"
+            fi
+          }
 
-          echo "Using sources jar: $SRC_JAR"
-          mkdir -p /tmp/mcsrc
-          if [ -n "$SRC_JAR" ]; then
-            unzip -o -q "$SRC_JAR" -d /tmp/mcsrc
-          else
-            echo "!!! Так и не нашли исходники ни в одном jar-е. Возможно, genSources кладёт их не в jar, а россыпью файлов — ищу так:"
-            find "$HOME/.gradle" -iname "Camera.java" 2>/dev/null
-          fi
+          dump_javap "Camera" "/Camera\.class$" ""
+          dump_javap "GameRenderer (методы про camera)" "/GameRenderer\.class$" "camera"
+          dump_javap "Minecraft (методы про blockRenderer/render)" "/Minecraft\.class$" "render"
+          dump_javap "BlockRenderDispatcher" "/BlockRenderDispatcher\.class$" ""
+          dump_javap "BlockModelShaper" "/BlockModelShaper\.class$" ""
 
-          echo "===== Camera.java (полностью) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "Camera.java" -path "*client*" -exec cat {} \; 2>/dev/null
+          echo "===== Поиск всех классов, содержащих в имени GuiGraphics ====="
+          find_class "GuiGraphics"
+          dump_javap "GuiGraphicsExtractor / GuiGraphics (методы blitSprite)" "GuiGraphics(Extractor)?\.class$" "blitSprite"
 
-          echo "===== GameRenderer.java (строки со словом camera/Camera) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "GameRenderer.java" -exec grep -n -i "camera" {} \; 2>/dev/null
+          dump_javap "RenderPipelines (константы GUI)" "/RenderPipelines\.class$" "GUI|gui"
+          dump_javap "ClipContext" "/ClipContext\.class$" ""
 
-          echo "===== Minecraft.java (строки про blockRenderer/BlockRenderDispatcher) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "Minecraft.java" -path "*client*" -exec grep -n -i "blockRenderer\|BlockRenderDispatcher" {} \; 2>/dev/null
-
-          echo "===== GuiGraphicsExtractor.java (весь файл, если найдётся) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "GuiGraphicsExtractor.java" -exec cat {} \; 2>/dev/null
-          echo "===== ...и на случай, если правильное имя класса другое, ищем любой файл со словом blitSprite ====="
-          grep -rl "blitSprite" /tmp/mcsrc 2>/dev/null | while read -r f; do echo "--- $f ---"; grep -n -B2 -A2 "blitSprite" "$f"; done
-
-          echo "===== RenderPipelines.java (строки со словом GUI) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "RenderPipelines.java" -exec grep -n -i "GUI" {} \; 2>/dev/null
-
-          echo "===== ClipContext.java (полностью, на всякий случай) ====="
-          find /tmp/mcsrc "$HOME/.gradle" -iname "ClipContext.java" -exec cat {} \; 2>/dev/null
+          echo "===== javap версия/доступность (для диагностики, если что-то из выше пусто) ====="
+          javap -version 2>&1 || echo "javap недоступен в PATH"
 
       - name: Build with Gradle
         run: gradle build --stacktrace
