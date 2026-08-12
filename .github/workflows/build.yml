@@ -22,69 +22,69 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      # ВРЕМЕННЫЙ диагностический шаг. Он никак не чинит сборку сам по
-      # себе — он читает точные сигнатуры методов нужных классов Minecraft
-      # (Camera, GameRenderer, Minecraft/BlockRenderDispatcher,
-      # GuiGraphicsExtractor#blitSprite, RenderPipelines, ClipContext)
-      # прямо из скомпилированных .class-файлов джарника через javap
-      # (штатная утилита JDK, без декомпиляции — раньше пробовали через
-      # Loom genSources, но в этой версии Loom декомпилированные исходники
-      # не кладутся ни в один доступный файл). У разработчика нет доступа
-      # в интернет, чтобы посмотреть эти сигнатуры напрямую, поэтому их
-      # нужно увидеть один раз здесь, в логе. Удалите этот шаг после того,
-      # как сборка снова заработает.
-      - name: DEBUG - dump relevant Minecraft API signatures
+      # ВРЕМЕННЫЙ диагностический шаг. Переходим на рендер эха прямо в 3D-
+      # мире (через WorldRenderEvents из Fabric API + RenderType.lines()),
+      # чтобы контуры блоков рисовались с правильной перспективой и
+      # перекрытием по глубине — как на референсе, а не проекцией квадратов
+      # на HUD. Нужны точные сигнатуры WorldRenderEvents, RenderType,
+      # VertexConsumer, MultiBufferSource, PoseStack в этой версии API —
+      # достаём их так же, как раньше доставали Camera/GameRenderer:
+      # javap по .class-файлам, без декомпиляции. Удалить после того, как
+      # 3D-рендер соберётся.
+      - name: DEBUG - dump world-rendering API signatures
         run: |
-          echo "DEBUG-SCRIPT-VERSION: v4-javap"
+          echo "DEBUG-SCRIPT-VERSION: v5-worldrender"
 
           MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
-          echo "Using jar: $MC_JAR"
+          echo "Minecraft jar: $MC_JAR"
           if [ -z "$MC_JAR" ]; then
-            echo "!!! Джарник ещё не скачан/не смаплен на этом этапе — соберём проект хотя бы частично, чтобы Loom его подготовил"
             gradle compileJava --stacktrace || true
             MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
-            echo "Using jar (2nd try): $MC_JAR"
+            echo "Minecraft jar (2nd try): $MC_JAR"
           fi
 
-          find_class() {
-            unzip -l "$MC_JAR" | grep -iE "$1" | awk '{print $4}'
+          find_any_jar_with_class() {
+            local cls="$1"
+            for jar in $(find "$HOME/.gradle/caches/modules-2" -iname "*.jar" 2>/dev/null); do
+              if unzip -l "$jar" 2>/dev/null | grep -q "$cls"; then
+                echo "$jar"
+                return
+              fi
+            done
+            for jar in $(find "$HOME/.gradle" -iname "*.jar" 2>/dev/null); do
+              if unzip -l "$jar" 2>/dev/null | grep -q "$cls"; then
+                echo "$jar"
+                return
+              fi
+            done
           }
 
-          dump_javap() {
-            local label="$1" pattern="$2" grepfor="$3"
-            echo "===== $label ====="
-            local entry
-            entry=$(find_class "$pattern" | head -n1)
-            echo "entry: $entry"
-            if [ -n "$entry" ]; then
-              local fqn
-              fqn=$(echo "$entry" | sed 's/\.class$//' | tr '/' '.')
-              if [ -n "$grepfor" ]; then
-                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 | grep -i -E "$grepfor" || echo "(нет строк по маске '$grepfor' — см. полный вывод ниже)"
-                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 || true
-              else
+          echo "===== Ищу jar с WorldRenderEvents (Fabric API) ====="
+          WRE_JAR=$(find_any_jar_with_class "WorldRenderEvents.class")
+          echo "WorldRenderEvents jar: $WRE_JAR"
+          if [ -n "$WRE_JAR" ]; then
+            javap -p -classpath "$WRE_JAR" net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents 2>&1 || true
+            echo "----- Вложенные интерфейсы (колбэки), если есть -----"
+            unzip -l "$WRE_JAR" | grep -i "WorldRenderEvents\$" || true
+          else
+            echo "!!! Не нашли WorldRenderEvents ни в одном jar-е — ищу похожие имена классов"
+            for jar in $(find "$HOME/.gradle" -iname "*fabric-api*.jar" -o -iname "*fabric-rendering*.jar" 2>/dev/null); do
+              echo "--- $jar ---"
+              unzip -l "$jar" 2>/dev/null | grep -i "render" | head -30
+            done
+          fi
+
+          if [ -n "$MC_JAR" ]; then
+            for cls_pattern in "/RenderType\.class$" "/MultiBufferSource\.class$" "/VertexConsumer\.class$" "/PoseStack\.class$" "/LevelRenderer\.class$"; do
+              echo "===== $cls_pattern ====="
+              entry=$(unzip -l "$MC_JAR" | grep -iE "$cls_pattern" | awk '{print $4}' | head -n1)
+              echo "entry: $entry"
+              if [ -n "$entry" ]; then
+                fqn=$(echo "$entry" | sed 's/\.class$//' | tr '/' '.')
                 javap -p -classpath "$MC_JAR" "$fqn" 2>&1 || true
               fi
-            else
-              echo "!!! класс не найден по паттерну $pattern"
-            fi
-          }
-
-          dump_javap "Camera" "/Camera\.class$" ""
-          dump_javap "GameRenderer (методы про camera)" "/GameRenderer\.class$" "camera"
-          dump_javap "Minecraft (методы про blockRenderer/render)" "/Minecraft\.class$" "render"
-          dump_javap "BlockRenderDispatcher" "/BlockRenderDispatcher\.class$" ""
-          dump_javap "BlockModelShaper" "/BlockModelShaper\.class$" ""
-
-          echo "===== Поиск всех классов, содержащих в имени GuiGraphics ====="
-          find_class "GuiGraphics"
-          dump_javap "GuiGraphicsExtractor / GuiGraphics (методы blitSprite)" "GuiGraphics(Extractor)?\.class$" "blitSprite"
-
-          dump_javap "RenderPipelines (константы GUI)" "/RenderPipelines\.class$" "GUI|gui"
-          dump_javap "ClipContext" "/ClipContext\.class$" ""
-
-          echo "===== javap версия/доступность (для диагностики, если что-то из выше пусто) ====="
-          javap -version 2>&1 || echo "javap недоступен в PATH"
+            done
+          fi
 
       - name: Build with Gradle
         run: gradle build --stacktrace
