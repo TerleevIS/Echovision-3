@@ -22,69 +22,42 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      # ВРЕМЕННЫЙ диагностический шаг. Переходим на рендер эха прямо в 3D-
-      # мире (через WorldRenderEvents из Fabric API + RenderType.lines()),
-      # чтобы контуры блоков рисовались с правильной перспективой и
-      # перекрытием по глубине — как на референсе, а не проекцией квадратов
-      # на HUD. Нужны точные сигнатуры WorldRenderEvents, RenderType,
-      # VertexConsumer, MultiBufferSource, PoseStack в этой версии API —
-      # достаём их так же, как раньше доставали Camera/GameRenderer:
-      # javap по .class-файлам, без декомпиляции. Удалить после того, как
-      # 3D-рендер соберётся.
-      - name: DEBUG - dump world-rendering API signatures
+      # ВРЕМЕННЫЙ диагностический шаг. WorldRenderEvents в этой версии
+      # Fabric API не существует (см. предыдущий CI-лог) — рендер мира
+      # переписан на новую систему (SubmitNodeCollector/GpuBufferSlice).
+      # Зато в Minecraft.java/LevelRenderer.java нашёлся встроенный пакет
+      # net.minecraft.gizmos.* (Gizmos, SimpleGizmoCollector,
+      # collectPerTickGizmos/addMainThreadGizmos) — похоже на официальный
+      # API для рисования отладочной геометрии (линий/боксов) прямо в
+      # 3D-мире. Смотрим его точные сигнатуры через javap, прежде чем
+      # переписывать рендер эха под него. Удалить после того, как 3D-рендер
+      # соберётся.
+      - name: DEBUG - dump gizmos API signatures
         run: |
-          echo "DEBUG-SCRIPT-VERSION: v5-worldrender"
+          echo "DEBUG-SCRIPT-VERSION: v6-gizmos"
 
           MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
           echo "Minecraft jar: $MC_JAR"
           if [ -z "$MC_JAR" ]; then
             gradle compileJava --stacktrace || true
             MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
-            echo "Minecraft jar (2nd try): $MC_JAR"
           fi
 
-          find_any_jar_with_class() {
-            local cls="$1"
-            for jar in $(find "$HOME/.gradle/caches/modules-2" -iname "*.jar" 2>/dev/null); do
-              if unzip -l "$jar" 2>/dev/null | grep -q "$cls"; then
-                echo "$jar"
-                return
-              fi
-            done
-            for jar in $(find "$HOME/.gradle" -iname "*.jar" 2>/dev/null); do
-              if unzip -l "$jar" 2>/dev/null | grep -q "$cls"; then
-                echo "$jar"
-                return
-              fi
-            done
-          }
+          echo "===== Все классы в пакете net.minecraft.gizmos ====="
+          unzip -l "$MC_JAR" | grep -oE "net/minecraft/gizmos/[A-Za-z0-9_$]+\.class" | sort -u
 
-          echo "===== Ищу jar с WorldRenderEvents (Fabric API) ====="
-          WRE_JAR=$(find_any_jar_with_class "WorldRenderEvents.class")
-          echo "WorldRenderEvents jar: $WRE_JAR"
-          if [ -n "$WRE_JAR" ]; then
-            javap -p -classpath "$WRE_JAR" net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents 2>&1 || true
-            echo "----- Вложенные интерфейсы (колбэки), если есть -----"
-            unzip -l "$WRE_JAR" | grep -i "WorldRenderEvents\$" || true
-          else
-            echo "!!! Не нашли WorldRenderEvents ни в одном jar-е — ищу похожие имена классов"
-            for jar in $(find "$HOME/.gradle" -iname "*fabric-api*.jar" -o -iname "*fabric-rendering*.jar" 2>/dev/null); do
-              echo "--- $jar ---"
-              unzip -l "$jar" 2>/dev/null | grep -i "render" | head -30
-            done
-          fi
+          for cls in \
+            "net.minecraft.gizmos.Gizmos" \
+            "net.minecraft.gizmos.Gizmos\$TemporaryCollection" \
+            "net.minecraft.gizmos.SimpleGizmoCollector" \
+            "net.minecraft.gizmos.SimpleGizmoCollector\$GizmoInstance" \
+            "net.minecraft.gizmos.GizmoCollector"; do
+            echo "===== javap -p $cls ====="
+            javap -p -classpath "$MC_JAR" "$cls" 2>&1 || true
+          done
 
-          if [ -n "$MC_JAR" ]; then
-            for cls_pattern in "/RenderType\.class$" "/MultiBufferSource\.class$" "/VertexConsumer\.class$" "/PoseStack\.class$" "/LevelRenderer\.class$"; do
-              echo "===== $cls_pattern ====="
-              entry=$(unzip -l "$MC_JAR" | grep -iE "$cls_pattern" | awk '{print $4}' | head -n1)
-              echo "entry: $entry"
-              if [ -n "$entry" ]; then
-                fqn=$(echo "$entry" | sed 's/\.class$//' | tr '/' '.')
-                javap -p -classpath "$MC_JAR" "$fqn" 2>&1 || true
-              fi
-            done
-          fi
+          echo "===== На всякий случай: все GizmoInstance-подобные классы во всём джарнике ====="
+          unzip -l "$MC_JAR" | grep -iE "gizmo" | awk '{print $4}' | sort -u
 
       - name: Build with Gradle
         run: gradle build --stacktrace
