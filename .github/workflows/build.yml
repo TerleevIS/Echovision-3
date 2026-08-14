@@ -22,19 +22,14 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      # ВРЕМЕННЫЙ диагностический шаг. WorldRenderEvents в этой версии
-      # Fabric API не существует (см. предыдущий CI-лог) — рендер мира
-      # переписан на новую систему (SubmitNodeCollector/GpuBufferSlice).
-      # Зато в Minecraft.java/LevelRenderer.java нашёлся встроенный пакет
-      # net.minecraft.gizmos.* (Gizmos, SimpleGizmoCollector,
-      # collectPerTickGizmos/addMainThreadGizmos) — похоже на официальный
-      # API для рисования отладочной геометрии (линий/боксов) прямо в
-      # 3D-мире. Смотрим его точные сигнатуры через javap, прежде чем
-      # переписывать рендер эха под него. Удалить после того, как 3D-рендер
-      # соберётся.
-      - name: DEBUG - dump gizmos API signatures
+      # ВРЕМЕННЫЙ диагностический шаг. Gizmos.cuboid(BlockPos, GizmoStyle) —
+      # то, что нужно для контуров блоков в 3D. Осталось узнать точный
+      # формат GizmoStyle (цвет/толщина линии) и базовый интерфейс Gizmo/
+      # GizmoProperties, прежде чем писать финальный рендер. Удалить после
+      # того, как 3D-рендер соберётся.
+      - name: DEBUG - dump GizmoStyle API signatures
         run: |
-          echo "DEBUG-SCRIPT-VERSION: v6-gizmos"
+          echo "DEBUG-SCRIPT-VERSION: v7-gizmostyle"
 
           MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
           echo "Minecraft jar: $MC_JAR"
@@ -43,21 +38,31 @@ jobs:
             MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
           fi
 
-          echo "===== Все классы в пакете net.minecraft.gizmos ====="
-          unzip -l "$MC_JAR" | grep -oE "net/minecraft/gizmos/[A-Za-z0-9_$]+\.class" | sort -u
-
           for cls in \
-            "net.minecraft.gizmos.Gizmos" \
-            "net.minecraft.gizmos.Gizmos\$TemporaryCollection" \
-            "net.minecraft.gizmos.SimpleGizmoCollector" \
-            "net.minecraft.gizmos.SimpleGizmoCollector\$GizmoInstance" \
-            "net.minecraft.gizmos.GizmoCollector"; do
+            "net.minecraft.gizmos.GizmoStyle" \
+            "net.minecraft.gizmos.Gizmo" \
+            "net.minecraft.gizmos.GizmoProperties" \
+            "net.minecraft.gizmos.CuboidGizmo" \
+            "net.minecraft.gizmos.LineGizmo" \
+            "net.minecraft.gizmos.GizmoPrimitives"; do
             echo "===== javap -p $cls ====="
             javap -p -classpath "$MC_JAR" "$cls" 2>&1 || true
           done
 
-          echo "===== На всякий случай: все GizmoInstance-подобные классы во всём джарнике ====="
-          unzip -l "$MC_JAR" | grep -iE "gizmo" | awk '{print $4}' | sort -u
+          echo "===== Ищу, где движок сам вызывает collectPerTickGizmos/withCollector (для понимания, когда безопасно звать Gizmos.* из мода) ====="
+          MC_JAR2="$MC_JAR"
+          for cls in "net.minecraft.client.Minecraft"; do
+            javap -p -classpath "$MC_JAR2" "$cls" 2>&1 | grep -i "gizmo" || true
+          done
+
+          echo "===== Проверяю наличие ClientTickEvents (Fabric API) для планирования вызова гизмо на тик ====="
+          for jar in $(find "$HOME/.gradle/caches/modules-2" -iname "*.jar" 2>/dev/null); do
+            if unzip -l "$jar" 2>/dev/null | grep -q "ClientTickEvents.class"; then
+              echo "Found in: $jar"
+              javap -p -classpath "$jar" net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents 2>&1 || true
+              break
+            fi
+          done
 
       - name: Build with Gradle
         run: gradle build --stacktrace
