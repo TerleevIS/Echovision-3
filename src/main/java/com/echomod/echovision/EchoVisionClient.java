@@ -70,9 +70,11 @@ public class EchoVisionClient implements ClientModInitializer {
                 EchoVisionHud::render
         );
 
-        // Обработка нажатий клавиш + чистка старых волн, раз в тик
+        // Обработка нажатий клавиш + чистка старых волн + рисование
+        // гизмо-контуров новых точек отражения, раз в тик.
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             SoundPulseManager.tick();
+            EchoVisionGizmoRenderer.tick();
 
             while (toggleModKey.consumeClick()) {
                 enabled = !enabled;
