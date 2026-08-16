@@ -22,12 +22,44 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      # ВРЕМЕННЫЙ диагностический шаг УДАЛЁН: реальные сигнатуры Camera,
-      # GameRenderer, Minecraft, GuiGraphicsExtractor, ClipContext и всего
-      # пакета net.minecraft.gizmos уже подтверждены через javap и учтены
-      # в коде (см. EchoVisionGizmoRenderer). Если появятся новые ошибки
-      # компиляции на других классах, аналогичный шаг с javap можно будет
-      # добавить обратно по тому же принципу.
+      # ВРЕМЕННЫЙ диагностический шаг. Две темы разом:
+      # 1) Хотим вешать на игрока ванильный эффект Blindness (слепота) —
+      #    это должно правильно "затемнить" мир на уровне 3D-рендера
+      #    (тумана), а не GUI-прямоугольником, которая всегда перекрывает
+      #    гизмо. Нужны точные сигнатуры MobEffects/MobEffectInstance/
+      #    LivingEntity#addEffect в этой версии — учитывая, что многие
+      #    базовые API уже оказывались Holder-based/переименованными.
+      # 2) SoundManagerMixin перехватывает только один метод "play" —
+      #    подозреваем, что реальные звуки шагов/блоков/мобов идут через
+      #    другую перегрузку или другой класс, поэтому от них эха не было
+      #    вообще. Дампим весь SoundManager, чтобы увидеть все входные
+      #    точки воспроизведения звука.
+      - name: DEBUG - dump blindness and sound API signatures
+        run: |
+          echo "DEBUG-SCRIPT-VERSION: v8-blindness-sound"
+
+          MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
+          echo "Minecraft jar: $MC_JAR"
+          if [ -z "$MC_JAR" ]; then
+            gradle compileJava --stacktrace || true
+            MC_JAR=$(find "$HOME/.gradle/caches/fabric-loom/minecraftMaven" -iname "minecraft-merged-deobf-*.jar" ! -iname "*.backup" 2>/dev/null | head -n1)
+          fi
+
+          echo "===== javap -p net.minecraft.world.effect.MobEffects ====="
+          javap -p -classpath "$MC_JAR" net.minecraft.world.effect.MobEffects 2>&1 | head -60
+
+          echo "===== javap -p net.minecraft.world.effect.MobEffectInstance (только конструкторы) ====="
+          javap -p -classpath "$MC_JAR" net.minecraft.world.effect.MobEffectInstance 2>&1 | grep -E "MobEffectInstance\(|public " | head -40
+
+          echo "===== javap -p net.minecraft.world.entity.LivingEntity (методы про effect) ====="
+          javap -p -classpath "$MC_JAR" net.minecraft.world.entity.LivingEntity 2>&1 | grep -i "effect" | head -60
+
+          echo "===== javap -p net.minecraft.client.sounds.SoundManager (ВЕСЬ класс) ====="
+          javap -p -classpath "$MC_JAR" net.minecraft.client.sounds.SoundManager 2>&1
+
+          echo "===== На всякий случай: playLocalSound в ClientLevel/Level ====="
+          javap -p -classpath "$MC_JAR" net.minecraft.client.multiplayer.ClientLevel 2>&1 | grep -i "sound" | head -40
+          javap -p -classpath "$MC_JAR" net.minecraft.world.level.Level 2>&1 | grep -i "sound" | head -40
 
       - name: Build with Gradle
         run: gradle build --stacktrace
