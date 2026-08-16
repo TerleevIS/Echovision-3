@@ -54,7 +54,11 @@ public final class SoundPulseManager {
     private SoundPulseManager() {}
 
     public static void addWorldPulse(double x, double y, double z, float volume) {
-        if (volume <= 0.01f) return;
+        if (volume <= 0.01f) {
+            System.out.println("[EchoVision-DEBUG] addWorldPulse ОТКЛОНЁН: слишком тихо (volume=" + volume + ")");
+            return;
+        }
+        System.out.println("[EchoVision-DEBUG] addWorldPulse ПРИНЯТ: x=" + x + " y=" + y + " z=" + z + " volume=" + volume);
         enqueue(SoundPulse.worldSound(x, y, z, volume));
     }
 
@@ -69,6 +73,8 @@ public final class SoundPulseManager {
             // а не копим бесконечно: иначе на шумных участках очередь росла
             // бы быстрее, чем мы успеваем её трассировать, и эхо начало бы
             // всё сильнее отставать от реальных звуков.
+            System.out.println("[EchoVision-DEBUG] enqueue ОТКЛОНЁН: очередь переполнена ("
+                    + pendingQueue.size() + "/" + MAX_PENDING_QUEUE + "), isWorldSound=" + pulse.isWorldSound);
             return;
         }
         pendingQueue.add(pulse);
@@ -103,6 +109,8 @@ public final class SoundPulseManager {
 
             List<EchoRayHit> hits = EchoRayTracer.trace(level, pulse.origin(), rayCount, MAX_ECHO_DISTANCE);
             pulse.setHits(hits);
+            System.out.println("[EchoVision-DEBUG] трассировка завершена: isWorldSound=" + pulse.isWorldSound
+                    + " rayCount=" + rayCount + " найдено точек=" + hits.size());
 
             if (activePulses.size() >= MAX_ACTIVE_PULSES) {
                 activePulses.remove(0);

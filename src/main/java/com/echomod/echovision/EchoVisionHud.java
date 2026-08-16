@@ -5,6 +5,7 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3fc;
 
@@ -13,22 +14,20 @@ import java.util.List;
 /**
  * Отрисовка эха.
  *
- * ВАЖНО, почему этот класс снова проецирует точки на экран вручную, а не
- * полагается только на Gizmos.cuboid(...) (см. EchoVisionGizmoRenderer):
- * гизмо рисуются как часть 3D-рендера МИРА, а чёрный экран (эффект
- * слепоты) — это GUI-слой, который всегда рисуется ПОВЕРХ мира и поэтому
- * полностью перекрывает любые гизмо, пока слепота включена. То есть
- * гизмо были видны только на долю секунды при выключении мода — ровно
- * симптом, о котором сообщил игрок.
- *
- * Решение: рисовать чёрный фон, а ПОСЛЕ него — те же самые точки
- * отражения, но уже спроецированные на экран через камеру игрока и
- * нарисованные прямо на GUI-слое (context.outline(...)), поэтому они
- * гарантированно видны поверх черноты, независимо от того, что творится
- * в 3D-мире. Gizmos.cuboid(...) в EchoVisionGizmoRenderer при этом не
- * убран — это задел на случай, если слепота когда-нибудь станет
- * полупрозрачной, тогда настоящие 3D-контуры будут просвечивать сквозь
- * неё естественным образом.
+ * ПОЧЕМУ НЕ Gizmos.cuboid(...) НАПРЯМУЮ: гизмо рисуются как часть 3D-
+ * рендера МИРА, а чёрный экран (эффект слепоты) — это GUI-слой, который
+ * ВСЕГДА рисуется поверх мира целиком (фундаментальное свойство
+ * пайплайна, не баг порядка вызовов). Поэтому гизмо физически не видны,
+ * пока слепота включена. Честная альтернатива — навесить на игрока
+ * ванильный эффект Blindness вместо своего чёрного прямоугольника — была
+ * рассмотрена и отклонена: эффект синхронизируется с сервером, и даже в
+ * одиночной игре встроенный сервер периодически "перезатирал" бы наш
+ * клиентский хак, вызывая мерцание. Поэтому вместо рискованной новой
+ * архитектуры этот класс улучшает то, что гарантированно работает:
+ * рисует ПРОЕЦИРОВАННЫЙ КАРКАС БЛОКА (все 8 вершин, все 12 рёбер, с
+ * настоящей перспективой через камеру игрока) прямо на GUI-слое, ПОСЛЕ
+ * чёрной заливки — то есть гарантированно поверх черноты, в отличие от
+ * гизмо. Внешне это уже полноценный wireframe-куб, а не плоский квадрат.
  *
  * Camera в этой версии Minecraft отдаёт позицию через position(), а
  * направления — через forwardVector()/upVector()/leftVector() в виде
@@ -37,23 +36,26 @@ import java.util.List;
  * публичное поле, не геттер (все имена подтверждены через javap).
  *
  * Стандартный прицел (crosshair) этот класс не трогает — см.
- * EchoVisionClient, где HUD-элемент подключён ПЕРЕД CROSSHAIR, чтобы
- * ванильный прицел рисовался поверх нашего чёрного фона и оставался
- * видимым.
+ * EchoVisionClient, где HUD-элемент подключён ПЕРЕД CROSSHAIR.
  */
 public final class EchoVisionHud {
 
     private static final int WORLD_ECHO_TINT = 0xFFFFC04D; // тёплый — настоящие звуки мира
     private static final int MIC_ECHO_TINT = 0xFF4DE8FF;   // холодный — звук от микрофона
 
-    // Сколько миллисекунд точка остаётся видна ПОСЛЕ того, как волна её
-    // достигла — короткая вспышка в момент попадания, затем угасание.
     private static final long REVEAL_LIFETIME_MS = 850;
+    private static final int LINE_THICKNESS_PX = 2;
 
-    // "Физический" размер отметки в блоках — масштаб перспективы.
-    private static final double BASE_MARK_SIZE_BLOCKS = 1.0;
-    private static final int MIN_PIXEL_SIZE = 4;
-    private static final int MAX_PIXEL_SIZE = 48;
+    // 8 вершин единичного куба блока (offset от BlockPos) и 12 рёбер между ними.
+    private static final double[][] CORNER_OFFSETS = {
+            {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, // "передняя" грань (z=0)
+            {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}  // "задняя" грань (z=1)
+    };
+    private static final int[][] EDGES = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 0}, // передняя грань
+            {4, 5}, {5, 6}, {6, 7}, {7, 4}, // задняя грань
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}  // соединяющие рёбра
+    };
 
     private EchoVisionHud() {}
 
@@ -81,14 +83,14 @@ public final class EchoVisionHud {
 
         List<SoundPulse> pulses = SoundPulseManager.getActive();
         for (SoundPulse pulse : pulses) {
-            if (!pulse.isResolved()) continue; // трассировка ещё не дошла до этой волны
+            if (!pulse.isResolved()) continue;
 
             double elapsedSec = pulse.ageMs() / 1000.0;
             double waveRadius = elapsedSec * SoundPulseManager.WAVE_SPEED_BLOCKS_PER_SEC;
             int tint = pulse.isWorldSound ? WORLD_ECHO_TINT : MIC_ECHO_TINT;
 
             for (EchoRayHit hit : pulse.getHits()) {
-                if (waveRadius < hit.distanceFromOrigin) continue; // волна ещё не долетела сюда
+                if (waveRadius < hit.distanceFromOrigin) continue;
 
                 long revealAge = pulse.ageMs()
                         - (long) (hit.distanceFromOrigin / SoundPulseManager.WAVE_SPEED_BLOCKS_PER_SEC * 1000.0);
@@ -98,40 +100,67 @@ public final class EchoVisionHud {
                 float intensity = Math.min(1f, fade * 1.6f) * (0.35f + pulse.volume * 0.65f);
                 if (intensity <= 0.02f) continue;
 
-                projectAndDraw(context, hit, camPos, forward, up, left, focal, width, height, tint, intensity);
+                drawWireframeCube(context, hit.blockPos, camPos, forward, up, left, focal, width, height, tint, intensity);
             }
         }
     }
 
-    private static void projectAndDraw(GuiGraphicsExtractor context, EchoRayHit hit, Vec3 camPos, Vec3 forward,
-                                        Vec3 up, Vec3 left, double focal, int width, int height,
-                                        int tint, float intensity) {
-        Vec3 rel = hit.hitPos.subtract(camPos);
-        double zCam = rel.dot(forward);
-        if (zCam <= 0.1) return; // точка позади камеры — не проецируем
+    private static void drawWireframeCube(GuiGraphicsExtractor context, BlockPos pos, Vec3 camPos, Vec3 forward,
+                                           Vec3 up, Vec3 left, double focal, int width, int height,
+                                           int tint, float intensity) {
+        double[][] screenCorners = new double[8][];
+        for (int i = 0; i < 8; i++) {
+            double wx = pos.getX() + CORNER_OFFSETS[i][0];
+            double wy = pos.getY() + CORNER_OFFSETS[i][1];
+            double wz = pos.getZ() + CORNER_OFFSETS[i][2];
+            screenCorners[i] = projectPoint(wx, wy, wz, camPos, forward, up, left, focal, width, height);
+        }
 
-        double xCam = -rel.dot(left); // left "смотрит" влево, экранный X растёт вправо
+        int alpha = Math.min(255, (int) (intensity * 255));
+        int argb = (alpha << 24) | (tint & 0x00FFFFFF);
+
+        for (int[] edge : EDGES) {
+            double[] a = screenCorners[edge[0]];
+            double[] b = screenCorners[edge[1]];
+            if (a == null || b == null) continue; // одна из вершин за камерой/вне экрана — рёбер не рисуем
+            drawLine(context, a[0], a[1], b[0], b[1], LINE_THICKNESS_PX, argb);
+        }
+    }
+
+    /** Возвращает {screenX, screenY} или null, если точка позади камеры или далеко за краем экрана. */
+    private static double[] projectPoint(double wx, double wy, double wz, Vec3 camPos, Vec3 forward,
+                                          Vec3 up, Vec3 left, double focal, int width, int height) {
+        Vec3 rel = new Vec3(wx, wy, wz).subtract(camPos);
+
+        double zCam = rel.dot(forward);
+        if (zCam <= 0.1) return null;
+
+        double xCam = -rel.dot(left);
         double yCam = rel.dot(up);
 
         double screenX = width / 2.0 + (xCam / zCam) * focal;
         double screenY = height / 2.0 - (yCam / zCam) * focal;
 
-        if (screenX < -32 || screenX > width + 32 || screenY < -32 || screenY > height + 32) return;
+        if (screenX < -200 || screenX > width + 200 || screenY < -200 || screenY > height + 200) return null;
 
-        int pixelSize = (int) Math.round((BASE_MARK_SIZE_BLOCKS / zCam) * focal);
-        pixelSize = Math.max(MIN_PIXEL_SIZE, Math.min(MAX_PIXEL_SIZE, pixelSize));
+        return new double[]{screenX, screenY};
+    }
 
-        int alpha = Math.min(255, (int) (intensity * 255));
-        int argb = (alpha << 24) | (tint & 0x00FFFFFF);
+    /** Рисует линию из мелких квадратиков — context.fill не умеет диагональные линии сам по себе. */
+    private static void drawLine(GuiGraphicsExtractor context, double x1, double y1, double x2, double y2,
+                                  int thickness, int argb) {
+        double dx = x2 - x1;
+        double dy = y2 - y1;
+        double length = Math.sqrt(dx * dx + dy * dy);
+        int steps = Math.max(1, Math.min(48, (int) (length / 2.0)));
+        int half = Math.max(1, thickness / 2);
 
-        int x = (int) screenX - pixelSize / 2;
-        int y = (int) screenY - pixelSize / 2;
-
-        // Рисуем ПОСЛЕ чёрного фона — поэтому гарантированно видно, в
-        // отличие от Gizmos.cuboid(...), который рисуется под чёрным
-        // экраном. Контур (outline), а не заливка — визуально ближе к
-        // "каркасу" блока, а не к сплошному квадрату.
-        context.outline(x, y, pixelSize, pixelSize, argb);
+        for (int i = 0; i <= steps; i++) {
+            double t = (double) i / steps;
+            int px = (int) Math.round(x1 + dx * t);
+            int py = (int) Math.round(y1 + dy * t);
+            context.fill(px - half, py - half, px - half + thickness, py - half + thickness, argb);
+        }
     }
 
     private static Vec3 toVec3(Vector3fc v) {

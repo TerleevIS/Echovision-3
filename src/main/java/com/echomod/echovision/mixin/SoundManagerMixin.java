@@ -20,6 +20,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * возвращаемого значения не важен для отмены звука — cir.cancel() без
  * setReturnValue(...) просто вернёт значение по умолчанию (null/false/0
  * в зависимости от реальной сигнатуры), а нам нужно только заглушить звук.
+ *
+ * ВРЕМЕННОЕ ЛОГИРОВАНИЕ: по javap подтверждено, что SoundManager#play —
+ * ЕДИНСТВЕННАЯ точка входа (перегрузок нет), то есть мод технически
+ * слушает правильный и единственный метод. Раз при этом эхо от звуков
+ * мира всё равно не появляется — источник проблемы либо в том, что
+ * sound.getX()/getY()/getZ()/getVolume() реально кидает исключение для
+ * обычных игровых звуков (и тогда наш catch(Throwable) молча их
+ * выбрасывает из системы), либо баг дальше по цепочке. Логи ниже (видны
+ * в logs/latest.log вашей игры, не в CI) должны сразу показать, какой
+ * из вариантов верный. Убрать после того, как звук от мира заработает.
  */
 @Mixin(SoundManager.class)
 public class SoundManagerMixin {
@@ -41,6 +51,9 @@ public class SoundManagerMixin {
             z = sound.getZ();
             volume = sound.getVolume();
         } catch (Throwable e) {
+            System.out.println("[EchoVision-DEBUG] play() поймал " + e.getClass().getName()
+                    + " (" + e.getMessage() + ") для звука " + sound.getClass().getName()
+                    + " — пульс НЕ создан, звук идёт как обычно.");
             // Некоторые SoundInstance (например, фоновая музыка из
             // MusicManager) резолвят внутренний Sound только внутри
             // оригинального play(), уже ПОСЛЕ точки HEAD — на этот момент
@@ -55,6 +68,10 @@ public class SoundManagerMixin {
             // видно — эхо просто выглядело "тише", чем должно быть.
             return;
         }
+
+        System.out.println("[EchoVision-DEBUG] play() поймал звук " + sound.getClass().getName()
+                + " x=" + x + " y=" + y + " z=" + z + " volume=" + volume
+                + " -> зову SoundPulseManager.addWorldPulse(...)");
 
         SoundPulseManager.addWorldPulse(x, y, z, volume);
 
